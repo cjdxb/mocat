@@ -31,27 +31,93 @@ sudo scripts/e2e-obfs.sh bin/mocat-controller bin/mocat-node   # 伪装抓包测
 
 ## 部署
 
-**控制端**
+整体流程：打包 → 部署控制端 → 把节点安装包放到控制端 → 在 Web 上新建节点，到节点上执行安装命令。以下命令均以 root 执行。
+
+### 1. 打包
+
+在装有 Go（版本见 `go.mod`）和 docker 的 Linux 机器（或 WSL）上执行：
 
 ```bash
-tar xzf mocat-controller-linux-amd64.tar.gz -C /opt && mv /opt/mocat-controller-linux-amd64 /opt/mocat-controller
+BUILD_FAKE=1 make package
+```
+
+得到 `dist/` 下 4 个包：`mocat-controller-linux-{amd64,arm64}.tar.gz`、`mocat-node-linux-{amd64,arm64}.tar.gz`。节点包内含 fakehttp / fakesip；如果 `third_party/bin/<arch>/` 下已有编译好的这两个程序，可以去掉 `BUILD_FAKE=1`。编译 arm64 版本需要先装好 binfmt/qemu（见 `scripts/build-fake.sh` 开头的注释）。
+
+### 2. 部署控制端
+
+```bash
+mkdir -p /opt/mocat-controller
+tar xzf mocat-controller-linux-amd64.tar.gz -C /opt/mocat-controller --strip-components=1
 cp /opt/mocat-controller/mocat-controller.service /etc/systemd/system/
+systemctl daemon-reload
 systemctl enable --now mocat-controller
 journalctl -u mocat-controller | grep password   # 首次启动时打印 admin 初始密码
 ```
 
-可选配置 `/etc/mocat/controller.json`：
+然后浏览器访问 `https://控制端IP:8443`，用 admin 和初始密码登录。默认使用自签名证书，浏览器会提示不安全，确认继续即可。
+
+配置文件 `/etc/mocat/controller.json` 可选，不存在时全部使用默认值。需要改时写入后执行 `systemctl restart mocat-controller`：
 
 ```json
-{"listen":"0.0.0.0:8443","data_dir":"/var/lib/mocat-controller","public_url":"https://控制端IP:8443",
- "tls_cert":"/path/cert.pem","tls_key":"/path/key.pem"}
+{
+  "listen": "0.0.0.0:8443",
+  "data_dir": "/var/lib/mocat-controller",
+  "public_url": "https://控制端IP:8443",
+  "tls_cert": "/path/cert.pem",
+  "tls_key": "/path/key.pem"
+}
 ```
 
-不配置证书时自动生成自签名证书。忘记密码时运行 `mocat-controller reset-password`。
+- `public_url`：节点安装命令里使用的控制端地址。控制端在 NAT 后面，或者通过域名访问时需要配置。
+- `tls_cert` / `tls_key`：不配置时自动生成自签名证书。
+- `data_dir` 如果不用默认路径，需要同步修改 service 文件中的 `ReadWritePaths`。
 
-**节点**：把 `mocat-node-linux-*.tar.gz` 放到控制端的 `/var/lib/mocat-controller/packages/` 下，然后在 Web 上新建节点，复制页面给出的一键安装命令到节点上执行。这条命令会固定控制端证书公钥（`--pinnedpubkey`）。也可以手动解压到 `/opt/mocat`，再执行页面上的「手动」命令。
+忘记密码时执行 `/opt/mocat-controller/mocat-controller reset-password`。
 
-节点依赖 `nft`、`socat`，`conntrack` 可选。运行 `mocat-node check` 查看环境检查结果。节点的管理端口（默认 9443）必须能被控制端访问。
+### 3. 上传节点安装包
+
+```bash
+mkdir -p /var/lib/mocat-controller/packages
+cp mocat-node-linux-amd64.tar.gz mocat-node-linux-arm64.tar.gz /var/lib/mocat-controller/packages/
+```
+
+只用到一种架构时，放对应的那个包即可。
+
+### 4. 部署节点
+
+在 Web 上新建节点，页面会给出安装命令，到节点上执行。
+
+- **一键安装**（推荐）：从控制端下载与本机架构对应的安装包，解压到 `/opt/mocat`，自动安装依赖（nftables、socat、conntrack）、写入 `/etc/mocat/node.json`、注册并启动 `mocat-node` 服务。下载时会校验控制端证书公钥（`--pinnedpubkey`）。
+- **手动安装**：节点无法访问控制端的 Web 端口时使用。
+
+  ```bash
+  mkdir -p /opt/mocat
+  tar xzf mocat-node-linux-amd64.tar.gz -C /opt/mocat --strip-components=1
+  cp /opt/mocat/mocat-node.service /etc/systemd/system/ && systemctl daemon-reload
+  # 自行安装 nftables、socat（conntrack 可选），然后执行页面上「手动」那条命令
+  ```
+
+安装完成后执行 `/opt/mocat/mocat-node check` 检查环境，回到 Web 上确认节点在线。
+
+注意：
+
+- 控制端必须能访问节点的管理端口（默认 9443），防火墙或安全组需放行。
+- 转发规则使用的入口端口也要放行。自动分配的端口在 20000-29999 范围内。
+- 主机 forward 链默认策略为 drop 时，需要放行 mocat 的转发流量（nft 后端）。
+
+### 升级与卸载
+
+**升级**：用新包覆盖解压（命令同上），然后 `systemctl restart mocat-controller` 或 `systemctl restart mocat-node`。节点的规则缓存在本地，重启后会自动恢复。升级节点时，记得同时更新控制端 `packages/` 下的安装包。
+
+**卸载节点**：
+
+```bash
+systemctl disable --now mocat-node
+/opt/mocat/mocat-node cleanup     # 确认 nft 表已删除
+rm -rf /opt/mocat /etc/mocat/node.json /var/lib/mocat /etc/systemd/system/mocat-node.service
+```
+
+卸载控制端的方法相同，删除 `/opt/mocat-controller`、`/var/lib/mocat-controller`、`/etc/mocat/controller.json` 和对应的 service 文件即可。
 
 ## 关键设计
 
