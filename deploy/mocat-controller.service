@@ -1,0 +1,20 @@
+[Unit]
+Description=mocat controller (web console)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/mocat-controller/mocat-controller run -c /etc/mocat/controller.json
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/mocat-controller
+StateDirectory=mocat-controller
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

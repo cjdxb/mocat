@@ -1,0 +1,18 @@
+[Unit]
+Description=mocat node (forwarding + FakeHTTP/FakeSIP obfuscation)
+Documentation=https://github.com/MikeWang000000/FakeHTTP
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/mocat/mocat-node run -c /etc/mocat/node.json
+# 节点自己负责按顺序停止 socat / 伪装进程并删除 nft 表；超时后 systemd 再强制清理
+KillMode=mixed
+TimeoutStopSec=20
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
