@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -184,12 +185,22 @@ func (m *Manager) resolve(r api.Rule, old string) (string, error) {
 			v6 = append(v6, ip.String())
 		}
 	}
-	cands := v4
-	if r.Backend == api.BackendSocat {
-		cands = append(cands, v6...)
+	// socat 可以在两个协议族之间转换，优先 IPv4；nft 后端不能转换，监听地址限定了协议族时只能取同族地址。
+	fam := 0
+	if r.Backend == api.BackendNft {
+		fam = api.ListenFamily(r.ListenAddr)
+	}
+	var cands []string
+	switch fam {
+	case 4:
+		cands = v4
+	case 6:
+		cands = v6
+	default:
+		cands = append(v4, v6...)
 	}
 	if len(cands) == 0 {
-		return "", fmt.Errorf("域名 %s 没有可用的 IPv4 地址", r.TargetHost)
+		return "", fmt.Errorf("域名 %s 没有可用的 IPv%d 地址（nftables 后端不能在 IPv4 与 IPv6 之间转换）", r.TargetHost, fam)
 	}
 	for _, c := range cands {
 		if c == old {
@@ -263,6 +274,33 @@ func (m *Manager) setSysctl(name, val string) error {
 		m.log.Info("已修改 sysctl", "name", name, "value", val, "old", old)
 	}
 	return nil
+}
+
+// enableForwarding 为 nft 后端开启对应协议族的转发。
+func (m *Manager) enableForwarding(v6 bool) error {
+	if !v6 {
+		return m.setSysctl("net.ipv4.ip_forward", "1")
+	}
+	if b, err := os.ReadFile("/proc/sys/net/ipv6/conf/all/forwarding"); err == nil && strings.TrimSpace(string(b)) == "1" {
+		return nil
+	}
+	// 开启 IPv6 转发后，accept_ra=1 的接口不再接受路由通告，靠 RA 获得默认路由的节点会断掉 IPv6。
+	// 先把这些接口（含 default，影响之后新建的接口）改为 2（转发时仍接受），退出时与 forwarding 一起恢复。
+	paths, _ := filepath.Glob("/proc/sys/net/ipv6/conf/*/accept_ra")
+	for _, p := range paths {
+		ifname := filepath.Base(filepath.Dir(p))
+		if ifname == "all" || ifname == "lo" {
+			continue
+		}
+		if b, err := os.ReadFile(p); err != nil || strings.TrimSpace(string(b)) != "1" {
+			continue
+		}
+		// sysctl 名中接口名里的 “.” 写作 “/”。
+		if err := m.setSysctl("net.ipv6.conf."+strings.ReplaceAll(ifname, ".", "/")+".accept_ra", "2"); err != nil {
+			return err
+		}
+	}
+	return m.setSysctl("net.ipv6.conf.all.forwarding", "1")
 }
 
 // acquireGroup 获取（必要时启动）伪装进程，并等待其就绪（队列已绑定）。
@@ -361,30 +399,57 @@ func (m *Manager) conntrackDelete(args ...string) {
 		}
 		return
 	}
-	// 没有匹配条目时 conntrack 返回非零，忽略。
-	_ = exec.Command(m.env.Conntrack, append([]string{"-D"}, args...)...).Run()
+	// conntrack 默认只操作 IPv4 表，两个协议族分别清理。没有匹配条目时返回非零，忽略。
+	for _, f := range []string{"ipv4", "ipv6"} {
+		_ = exec.Command(m.env.Conntrack, append([]string{"-D", "-f", f}, args...)...).Run()
+	}
 }
 
-func socatArgs(r api.Rule, ip string) []string {
+// isAnyAddr 监听地址是否表示“所有地址”（空、0.0.0.0、::）。
+func isAnyAddr(addr string) bool {
+	if addr == "" {
+		return true
+	}
+	ip := net.ParseIP(addr)
+	return ip != nil && ip.IsUnspecified()
+}
+
+// socatArgs 生成 socat 参数。socat 在两端各自建立套接字，监听与目标可以是不同的协议族（IPv4 / IPv6 互转）。
+// 监听地址为空时，若本机启用了 IPv6 则双栈监听（ipv6only=0，IPv4 客户端以映射地址接入），否则只监听 IPv4。
+func socatArgs(r api.Rule, ip string, hasIPv6 bool) []string {
 	v := "4"
 	tgt := ip
 	if api.IsIPv6(ip) {
 		v = "6"
 		tgt = "[" + ip + "]"
 	}
-	listenOpts := ",reuseaddr,fork"
-	if r.ListenAddr != "" && r.ListenAddr != "0.0.0.0" {
-		listenOpts += ",bind=" + r.ListenAddr
+	lv := "4"
+	listenOpts := ""
+	switch api.ListenFamily(r.ListenAddr) {
+	case 0:
+		if hasIPv6 {
+			lv, listenOpts = "6", ",ipv6only=0"
+		}
+	case 4:
+		if !isAnyAddr(r.ListenAddr) {
+			listenOpts = ",bind=" + r.ListenAddr
+		}
+	case 6:
+		lv, listenOpts = "6", ",ipv6only=1"
+		if !isAnyAddr(r.ListenAddr) {
+			listenOpts += ",bind=[" + r.ListenAddr + "]"
+		}
 	}
+	listenOpts += ",reuseaddr,fork"
 	if r.Protocol == api.ProtoTCP {
 		return []string{
-			fmt.Sprintf("TCP4-LISTEN:%d%s", r.ListenPort, listenOpts),
+			fmt.Sprintf("TCP%s-LISTEN:%d%s", lv, r.ListenPort, listenOpts),
 			fmt.Sprintf("TCP%s:%s:%d", v, tgt, r.TargetPort),
 		}
 	}
 	return []string{
 		"-T", "120",
-		fmt.Sprintf("UDP4-LISTEN:%d%s", r.ListenPort, listenOpts),
+		fmt.Sprintf("UDP%s-LISTEN:%d%s", lv, r.ListenPort, listenOpts),
 		fmt.Sprintf("UDP%s:%s:%d", v, tgt, r.TargetPort),
 	}
 }
@@ -453,7 +518,7 @@ func (m *Manager) reconcileLocked() {
 			continue
 		}
 		if p.rule.Backend == api.BackendNft {
-			if err := m.setSysctl("net.ipv4.ip_forward", "1"); err != nil {
+			if err := m.enableForwarding(api.IsIPv6(p.ip)); err != nil {
 				rt.failed = err.Error()
 				continue
 			}
@@ -501,7 +566,7 @@ func (m *Manager) reconcileLocked() {
 	// 5. 最后开启 socat 转发
 	for _, rt := range added {
 		if rt.rule.Backend == api.BackendSocat {
-			rt.socat = NewProc("socat:"+rt.rule.ID, m.env.Socat, socatArgs(rt.rule, rt.ip), m.log)
+			rt.socat = NewProc("socat:"+rt.rule.ID, m.env.Socat, socatArgs(rt.rule, rt.ip, m.env.HasIPv6), m.log)
 			rt.socat.SetGID(socatGID(ruleMark(rt.slot)))
 			rt.socat.Start()
 		}

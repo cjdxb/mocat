@@ -64,6 +64,22 @@ func TestCompileChain(t *testing.T) {
 	if _, err := w.Validate(); err == nil || !strings.Contains(err.Error(), "冲突") {
 		t.Errorf("期望端口冲突，得到 %v", err)
 	}
+	w.Rules = nil
+
+	// B 用 nft 后端：从 IPv6 入口转到 IPv4 的下一跳不可行
+	w.Nodes["b"] = Node{ID: "b", Name: "B", Host: "10.0.0.2", DataHost: "2001:db8::2", Port: 9443}
+	if _, err := w.Validate(); err == nil || !strings.Contains(err.Error(), "第 2 跳使用 nftables") {
+		t.Errorf("期望 nft 协议族不一致错误，得到 %v", err)
+	}
+	// 改用 socat 即可互转
+	w.Chains[0].Hops[1].Backend = "socat"
+	out, err = w.Validate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["a"][0].TargetHost != "2001:db8::2" {
+		t.Errorf("A 目标错误: %s", out["a"][0].TargetHost)
+	}
 }
 
 // ---- HTTP API ----

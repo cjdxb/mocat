@@ -5,6 +5,7 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const hostPort = (h, p) => (String(h).includes(':') ? `[${h}]` : h) + ':' + p;
 
 const S = { templates: [], nodes: [], refresh: null, route: '', chainDraft: null };
 
@@ -288,8 +289,8 @@ function rulesTable(rules, showNode) {
           ${r.remark ? `<div class="muted small-text">${esc(r.remark)}</div>` : ''}</td>
       ${showNode ? `<td><a href="#/nodes/${esc(r.node_id)}">${esc(r.node_name)}</a></td>` : ''}
       <td>${esc((r.protocol || '').toUpperCase())}</td>
-      <td><code>${esc(r.listen_addr || '*')}:${r.listen_port}</code></td>
-      <td><code>${esc(r.target_host)}:${r.target_port}</code>${r.resolved_ip && r.resolved_ip !== r.target_host ? `<div class="muted small-text">${esc(r.resolved_ip)}</div>` : ''}</td>
+      <td><code>${esc(hostPort(r.listen_addr || '*', r.listen_port))}</code></td>
+      <td><code>${esc(hostPort(r.target_host, r.target_port))}</code>${r.resolved_ip && r.resolved_ip !== r.target_host ? `<div class="muted small-text">${esc(r.resolved_ip)}</div>` : ''}</td>
       <td>${esc(BACKEND[r.backend] || r.backend)}</td>
       <td>${obfsSummary(r.obfs, r.resolved)}</td>
       <td>${badge(r.state)}${r.reason ? `<div class="reason">${esc(r.reason)}</div>` : ''}${r.stats && r.stats.blocked ? `<div class="reason">伪装队列丢弃 ${r.stats.blocked} 个报文</div>` : ''}</td>
@@ -377,7 +378,7 @@ function ruleForm(r, nodeFixed) {
       <label>&nbsp;<span><input type="checkbox" name="enabled" ${r.enabled ? 'checked' : ''}>启用</span></label>
     </div>
     <div class="row">
-      <label>监听地址（可选，默认所有 IPv4 地址）<input name="listen_addr" value="${esc(r.listen_addr)}" placeholder="0.0.0.0"></label>
+      <label>监听地址（可选，IPv4 / IPv6；留空为所有地址，0.0.0.0 / :: 为所有 IPv4 / IPv6 地址。nftables 不能在 IPv4 与 IPv6 之间转换，留空时只转发与目标同协议族的连接）<input name="listen_addr" value="${esc(r.listen_addr)}" placeholder="留空 = 所有地址"></label>
       <label>监听端口<input name="listen_port" type="number" min="1" max="65535" value="${esc(r.listen_port)}" required></label>
     </div>
     <div class="row">

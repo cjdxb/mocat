@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"sort"
 
 	"mocat/internal/api"
@@ -118,6 +119,14 @@ func (w *World) compileChain(c Chain) ([]CompiledRule, error) {
 		if i+1 < len(c.Hops) {
 			next := w.Nodes[c.Hops[i+1].NodeID]
 			host, port = next.DataAddr(), c.Hops[i+1].ListenPort
+		}
+		// nft 后端不能转换协议族：上一跳连入本节点用的地址与本跳目标须同为 IPv4 或同为 IPv6（域名无法预知，不检查）。
+		if i > 0 && h.Backend == api.BackendNft {
+			cur := w.Nodes[h.NodeID]
+			in := cur.DataAddr()
+			if net.ParseIP(in) != nil && net.ParseIP(host) != nil && api.IsIPv6(in) != api.IsIPv6(host) {
+				return nil, fmt.Errorf("转发链「%s」第 %d 跳使用 nftables 后端，入口地址 %s 与目标 %s 的协议族不同，nftables 不能在 IPv4 与 IPv6 之间转换，请改用 socat 后端", c.Name, i+1, in, host)
+			}
 		}
 		out = append(out, CompiledRule{NodeID: h.NodeID, ChainID: c.ID, Hop: i, Rule: api.Rule{
 			ID: ChainRuleID(c.ID, i), Name: fmt.Sprintf("%s#%d", c.Name, i+1), Enabled: c.Enabled,

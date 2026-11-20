@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -118,9 +119,13 @@ func (f *Fake) Rules(r RuleEnv, g GroupEnv) Rules {
 		// nft 后端下客户端 SYN 可能携带 TFO 数据，会在伪装报文之前到达目标，直接丢弃（N-25），
 		// 客户端会退回普通握手重试。
 		if r.Backend == api.BackendNft {
-			m := fmt.Sprintf("meta nfproto ipv4 tcp dport %d", r.ListenPort)
-			if r.ListenAddr != "" && r.ListenAddr != "0.0.0.0" {
-				m += " ip daddr " + r.ListenAddr
+			fam, kw := "ipv4", "ip"
+			if r.IPv6 {
+				fam, kw = "ipv6", "ip6"
+			}
+			m := fmt.Sprintf("meta nfproto %s tcp dport %d", fam, r.ListenPort)
+			if ip := net.ParseIP(r.ListenAddr); ip != nil && !ip.IsUnspecified() {
+				m += " " + kw + " daddr " + r.ListenAddr
 			}
 			if r.HasFib {
 				m += " fib daddr type local"

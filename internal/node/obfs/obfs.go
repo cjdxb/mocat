@@ -29,6 +29,7 @@ type RuleEnv struct {
 	ListenPort int
 	ListenAddr string
 	HasFib     bool
+	IPv6       bool // nft 后端转发的协议族（与目标一致）
 }
 
 // Rules 插件需要加入的 nft 规则行，按链分组。

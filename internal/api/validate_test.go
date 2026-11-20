@@ -22,8 +22,14 @@ func TestValidateRule(t *testing.T) {
 		{"udp 不能用 FakeHTTP", func(r *Rule) { r.Protocol = ProtoUDP; r.Obfs = Obfs{Type: ObfsFakeHTTP} }, "FakeHTTP 只能用于 TCP"},
 		{"端口越界", func(r *Rule) { r.ListenPort = 70000 }, "监听端口"},
 		{"目标格式", func(r *Rule) { r.TargetHost = "bad host!" }, "目标地址"},
-		{"nft 不支持 IPv6", func(r *Rule) { r.Backend = BackendNft; r.TargetHost = "2001:db8::1" }, "IPv6"},
+		{"nft 支持 IPv6", func(r *Rule) { r.Backend = BackendNft; r.TargetHost = "2001:db8::1" }, ""},
+		{"nft v6→v6", func(r *Rule) { r.Backend = BackendNft; r.ListenAddr = "::"; r.TargetHost = "2001:db8::1" }, ""},
+		{"nft 不能 v4→v6", func(r *Rule) { r.Backend = BackendNft; r.ListenAddr = "0.0.0.0"; r.TargetHost = "2001:db8::1" }, "不能在 IPv4 与 IPv6 之间转换"},
+		{"nft 不能 v6→v4", func(r *Rule) { r.Backend = BackendNft; r.ListenAddr = "2001:db8::2"; r.TargetHost = "1.2.3.4" }, "不能在 IPv4 与 IPv6 之间转换"},
+		{"nft 监听 v6 目标域名", func(r *Rule) { r.Backend = BackendNft; r.ListenAddr = "::" }, ""},
 		{"socat 支持 IPv6", func(r *Rule) { r.TargetHost = "2001:db8::1" }, ""},
+		{"socat v6→v4", func(r *Rule) { r.ListenAddr = "2001:db8::2"; r.TargetHost = "1.2.3.4" }, ""},
+		{"监听地址格式", func(r *Rule) { r.ListenAddr = "abc" }, "监听地址"},
 		{"TTL 越界", func(r *Rule) {
 			r.Obfs = Obfs{Type: ObfsFakeHTTP, Params: json.RawMessage(`{"ttl":300}`)}
 		}, "TTL"},

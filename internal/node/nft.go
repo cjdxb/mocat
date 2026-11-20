@@ -44,6 +44,21 @@ func counterName(ruleID, dir string) string {
 
 type counterVal struct{ Packets, Bytes uint64 }
 
+func nfproto(v6 bool) string {
+	if v6 {
+		return "ipv6"
+	}
+	return "ipv4"
+}
+
+// ipKw nft 中协议族对应的关键字（ip daddr / ip6 daddr、dnat ip / dnat ip6）。
+func ipKw(v6 bool) string {
+	if v6 {
+		return "ip6"
+	}
+	return "ip"
+}
+
 // nftRule 参与生成 nft 规则集的一条活动规则。
 type nftRule struct {
 	rule  api.Rule
@@ -93,20 +108,26 @@ func buildRuleset(rules []nftRule, groups []*groupRT, counters map[string]counte
 			// 从第一个 SYN 起就打上连接标记（socat 的 setsockopt SO_MARK 在 connect 之后才生效，不能用）。
 			out = append(out, fmt.Sprintf("meta skgid %d ct direction original %s", socatGID(r.mark), setMark))
 		case api.BackendNft:
-			m := fmt.Sprintf("meta nfproto ipv4 meta l4proto %s th dport %d", r.rule.Protocol, r.rule.ListenPort)
-			if r.rule.ListenAddr != "" && r.rule.ListenAddr != "0.0.0.0" {
-				m += " ip daddr " + r.rule.ListenAddr
+			// DNAT 不能改变协议族：只匹配与目标同族的报文（监听地址的协议族已在校验 / 解析时与目标一致）。
+			v6 := api.IsIPv6(r.ip)
+			m := fmt.Sprintf("meta nfproto %s meta l4proto %s th dport %d", nfproto(v6), r.rule.Protocol, r.rule.ListenPort)
+			if !isAnyAddr(r.rule.ListenAddr) {
+				m += " " + ipKw(v6) + " daddr " + r.rule.ListenAddr
 			}
 			if hasFib {
 				m += " fib daddr type local"
 			}
-			dnat = append(dnat, fmt.Sprintf("%s %s dnat ip to %s:%d", m, setMark, r.ip, r.rule.TargetPort))
+			tgt := r.ip
+			if v6 {
+				tgt = "[" + r.ip + "]"
+			}
+			dnat = append(dnat, fmt.Sprintf("%s %s dnat %s to %s:%d", m, setMark, ipKw(v6), tgt, r.rule.TargetPort))
 			snat = append(snat, fmt.Sprintf("ct status dnat %s masquerade", match))
 		}
 		if r.group != nil {
 			fr := r.group.plugin.Rules(obfs.RuleEnv{
 				CtMark: r.mark, Mask: markMask, Backend: r.rule.Backend, Protocol: r.rule.Protocol,
-				ListenPort: r.rule.ListenPort, ListenAddr: r.rule.ListenAddr, HasFib: hasFib,
+				ListenPort: r.rule.ListenPort, ListenAddr: r.rule.ListenAddr, HasFib: hasFib, IPv6: api.IsIPv6(r.ip),
 			}, r.group.env())
 			pre = append(pre, fr.Pre...)
 			post = append(post, fr.Post...)

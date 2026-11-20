@@ -24,6 +24,7 @@ type Env struct {
 	Conntrack string
 	HasFib    bool // 内核是否支持 nft fib 表达式
 	HasQueue  bool // 内核是否支持 NFQUEUE
+	HasIPv6   bool // 本机是否启用了 IPv6
 	Root      bool
 	Backends  []api.BackendInfo
 	Warnings  []string
@@ -117,6 +118,11 @@ func CheckEnv(binDir string) *Env {
 	}
 	_ = exec.Command("modprobe", "nf_conntrack").Run()
 
+	// IPv6 被禁用（如 ipv6.disable=1）时该文件不存在，socat 不能双栈监听。
+	if _, err := os.Stat("/proc/net/if_inet6"); err == nil {
+		e.HasIPv6 = true
+	}
+
 	if e.Nft != "" && e.Root {
 		e.HasFib = probeFib(e.Nft)
 	}
@@ -196,7 +202,16 @@ func SysInfo() api.SystemInfo {
 
 // setSysctl 设置 sysctl，返回原值。
 func setSysctl(name, val string) (old string, err error) {
-	p := "/proc/sys/" + strings.ReplaceAll(name, ".", "/")
+	// 与 sysctl 命令一致：名字中的 “.” 是层级分隔，“/” 对应接口名里的 “.”。
+	p := "/proc/sys/" + strings.Map(func(r rune) rune {
+		switch r {
+		case '.':
+			return '/'
+		case '/':
+			return '.'
+		}
+		return r
+	}, name)
 	b, err := os.ReadFile(p)
 	if err != nil {
 		return "", err

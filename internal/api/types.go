@@ -43,7 +43,7 @@ type Rule struct {
 	Name       string `json:"name,omitempty"`
 	Enabled    bool   `json:"enabled"`
 	Protocol   string `json:"protocol"`
-	ListenAddr string `json:"listen_addr,omitempty"` // 为空表示所有地址（IPv4）
+	ListenAddr string `json:"listen_addr,omitempty"` // 为空表示所有地址（IPv4 + IPv6），0.0.0.0 / :: 表示所有 IPv4 / IPv6 地址
 	ListenPort int    `json:"listen_port"`
 	TargetHost string `json:"target_host"` // IPv4 / IPv6 / 域名
 	TargetPort int    `json:"target_port"`

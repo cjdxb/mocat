@@ -28,6 +28,17 @@ func IsIPv6(h string) bool {
 	return ip != nil && ip.To4() == nil
 }
 
+// ListenFamily 监听地址限定的协议族：空为不限（0），0.0.0.0 或 IPv4 地址为 4，:: 或 IPv6 地址为 6。
+func ListenFamily(addr string) int {
+	if addr == "" {
+		return 0
+	}
+	if IsIPv6(addr) {
+		return 6
+	}
+	return 4
+}
+
 // DefaultFakeParams 内置默认参数（C-31）。
 func DefaultFakeParams(typ string) FakeParams {
 	p := FakeParams{TTL: 3, Repeat: 2}
@@ -124,9 +135,8 @@ func ValidateRule(r *Rule) error {
 		return fmt.Errorf("目标端口必须在 1-65535 之间")
 	}
 	if r.ListenAddr != "" {
-		ip := net.ParseIP(r.ListenAddr)
-		if ip == nil || ip.To4() == nil {
-			return fmt.Errorf("监听地址必须是 IPv4 地址")
+		if net.ParseIP(r.ListenAddr) == nil {
+			return fmt.Errorf("监听地址必须是 IPv4 或 IPv6 地址")
 		}
 	}
 	if !IsValidHost(r.TargetHost) {
@@ -135,8 +145,14 @@ func ValidateRule(r *Rule) error {
 	switch r.Backend {
 	case BackendSocat:
 	case BackendNft:
-		if IsIPv6(r.TargetHost) {
-			return fmt.Errorf("nftables 后端暂不支持 IPv6 目标，请使用 socat 后端")
+		if lf := ListenFamily(r.ListenAddr); lf != 0 && net.ParseIP(r.TargetHost) != nil {
+			tf := 4
+			if IsIPv6(r.TargetHost) {
+				tf = 6
+			}
+			if lf != tf {
+				return fmt.Errorf("nftables 后端不能在 IPv4 与 IPv6 之间转换，监听地址与目标地址须同为 IPv4 或同为 IPv6，需要转换请使用 socat 后端")
+			}
 		}
 	default:
 		return fmt.Errorf("后端必须是 socat 或 nft")

@@ -118,12 +118,57 @@ func TestFakeCommand(t *testing.T) {
 }
 
 func TestSocatArgs(t *testing.T) {
-	a := socatArgs(api.Rule{Protocol: "tcp", ListenPort: 1000, TargetPort: 80}, "1.2.3.4")
-	if strings.Join(a, " ") != "TCP4-LISTEN:1000,reuseaddr,fork TCP4:1.2.3.4:80" {
-		t.Errorf("tcp: %v", a)
+	cases := []struct {
+		r    api.Rule
+		ip   string
+		v6   bool
+		want string
+	}{
+		// 本机无 IPv6：只监听 IPv4
+		{api.Rule{Protocol: "tcp", ListenPort: 1000, TargetPort: 80}, "1.2.3.4", false, "TCP4-LISTEN:1000,reuseaddr,fork TCP4:1.2.3.4:80"},
+		// 默认双栈监听
+		{api.Rule{Protocol: "tcp", ListenPort: 1000, TargetPort: 80}, "2001:db8::1", true, "TCP6-LISTEN:1000,ipv6only=0,reuseaddr,fork TCP6:[2001:db8::1]:80"},
+		// v4 → v6
+		{api.Rule{Protocol: "udp", ListenPort: 1000, ListenAddr: "10.0.0.1", TargetPort: 53}, "2001:db8::1", true, "-T 120 UDP4-LISTEN:1000,bind=10.0.0.1,reuseaddr,fork UDP6:[2001:db8::1]:53"},
+		{api.Rule{Protocol: "tcp", ListenPort: 1000, ListenAddr: "0.0.0.0", TargetPort: 80}, "1.2.3.4", true, "TCP4-LISTEN:1000,reuseaddr,fork TCP4:1.2.3.4:80"},
+		// v6 → v4
+		{api.Rule{Protocol: "tcp", ListenPort: 1000, ListenAddr: "2001:db8::2", TargetPort: 80}, "1.2.3.4", true, "TCP6-LISTEN:1000,ipv6only=1,bind=[2001:db8::2],reuseaddr,fork TCP4:1.2.3.4:80"},
+		{api.Rule{Protocol: "udp", ListenPort: 1000, ListenAddr: "::", TargetPort: 53}, "1.2.3.4", true, "-T 120 UDP6-LISTEN:1000,ipv6only=1,reuseaddr,fork UDP4:1.2.3.4:53"},
 	}
-	a = socatArgs(api.Rule{Protocol: "udp", ListenPort: 1000, ListenAddr: "10.0.0.1", TargetPort: 53}, "2001:db8::1")
-	if strings.Join(a, " ") != "-T 120 UDP4-LISTEN:1000,reuseaddr,fork,bind=10.0.0.1 UDP6:[2001:db8::1]:53" {
-		t.Errorf("udp6: %v", a)
+	for _, c := range cases {
+		if got := strings.Join(socatArgs(c.r, c.ip, c.v6), " "); got != c.want {
+			t.Errorf("得到 %s\n期望 %s", got, c.want)
+		}
+	}
+}
+
+func TestBuildRulesetIPv6(t *testing.T) {
+	fh := &groupRT{key: "fh", plugin: &obfs.Fake{Type: api.ObfsFakeHTTP, Bin: "/bin/true"}, idx: 1, queue: queueBase + 1, mark: procMark(1), refs: 1}
+	rules := []nftRule{
+		{rule: api.Rule{ID: "a", Protocol: "tcp", ListenPort: 8080, TargetHost: "2001:db8::1", TargetPort: 80, Backend: api.BackendNft, Obfs: api.Obfs{Type: api.ObfsFakeHTTP}}, ip: "2001:db8::1", mark: ruleMark(1), group: fh},
+		{rule: api.Rule{ID: "b", Protocol: "udp", ListenPort: 5000, ListenAddr: "2001:db8::2", TargetHost: "2001:db8::3", TargetPort: 53, Backend: api.BackendNft}, ip: "2001:db8::3", mark: ruleMark(2)},
+		{rule: api.Rule{ID: "c", Protocol: "udp", ListenPort: 5001, ListenAddr: "::", TargetHost: "2001:db8::4", TargetPort: 53, Backend: api.BackendNft}, ip: "2001:db8::4", mark: ruleMark(3)},
+	}
+	s := buildRuleset(rules, []*groupRT{fh}, nil, true)
+	must := []string{
+		"meta nfproto ipv6 meta l4proto tcp th dport 8080 fib daddr type local ct mark set ct mark and 0x0000ffff or 0x6d010000 dnat ip6 to [2001:db8::1]:80",
+		"meta nfproto ipv6 meta l4proto udp th dport 5000 ip6 daddr 2001:db8::2 fib daddr type local ct mark set ct mark and 0x0000ffff or 0x6d020000 dnat ip6 to [2001:db8::3]:53",
+		"meta nfproto ipv6 meta l4proto udp th dport 5001 fib daddr type local ct mark set ct mark and 0x0000ffff or 0x6d030000 dnat ip6 to [2001:db8::4]:53",
+		"meta nfproto ipv6 tcp dport 8080 fib daddr type local tcp flags & (syn|ack) == syn tcp option fastopen exists drop",
+	}
+	for _, m := range must {
+		if !strings.Contains(s, m) {
+			t.Errorf("规则集缺少: %s\n---\n%s", m, s)
+		}
+	}
+	if strings.Contains(s, "ip daddr ::") || strings.Contains(s, "nfproto ipv4") {
+		t.Errorf("IPv6 规则不应出现 IPv4 匹配:\n%s", s)
+	}
+	if os.Getenv("MOCAT_NFT_TEST") == "1" {
+		cmd := exec.Command("nft", "-c", "-f", "-")
+		cmd.Stdin = strings.NewReader(buildRuleset(rules, []*groupRT{fh}, nil, probeFib("nft")))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("nft -c 失败: %v\n%s", err, out)
+		}
 	}
 }

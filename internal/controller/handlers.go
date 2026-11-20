@@ -3,7 +3,9 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -236,7 +238,7 @@ func (s *Server) chainView(world *World, c Chain) ChainView {
 			st := rt.Stats[hv.RuleID]
 			v.UpBytes, v.DownBytes, v.Conns = st.UpBytes, st.DownBytes, st.Conns
 			v.Rate = rt.Rates[hv.RuleID]
-			v.Entry = fmt.Sprintf("%s:%d", n.DataAddr(), h.ListenPort)
+			v.Entry = net.JoinHostPort(n.DataAddr(), strconv.Itoa(h.ListenPort))
 		}
 		v.HopViews = append(v.HopViews, hv)
 	}
