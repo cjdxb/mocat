@@ -7,8 +7,8 @@
 set -eu
 
 ARCH="${1:?arch}"
-OUT="$(cd "$(dirname "${2:?outdir}")" && pwd)/$(basename "$2")"
-mkdir -p "$OUT"
+mkdir -p "${2:?outdir}"
+OUT="$(cd "$2" && pwd)"
 
 # 固定版本（升级时同步更新 THIRD_PARTY.md）
 FAKEHTTP_VER=0.9.18
